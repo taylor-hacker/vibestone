@@ -1,0 +1,96 @@
+# =============================================================================
+# Continuous integration: runs on every push and pull request.
+#
+# Two independent jobs, one per half of the monorepo, so a failure clearly
+# shows which half broke. Neither job needs a model: the backend tests use a
+# fake LLM and the extension tests mock `fetch`.
+# =============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel an in-progress run when new commits are pushed to the same branch.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (Python)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      # Installs uv and caches its downloads between runs.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.13.5"
+          enable-cache: true
+
+      # --locked fails if uv.lock is out of date with pyproject.toml, which
+      # catches "forgot to commit the lockfile" mistakes.
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Type-check
+        run: uv run mypy
+
+      - name: Test
+        run: uv run pytest
+
+      # Make sure the Dockerfile still builds (not pushed anywhere).
+      - name: Build Docker image
+        run: docker build -t vibestone-backend:ci .
+
+  extension:
+    name: Extension (TypeScript + Vue)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm must be installed before setup-node so setup-node can cache its store.
+      # The pnpm version comes from "packageManager" in extension/package.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: extension/package.json
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: extension/pnpm-lock.yaml
+
+      # --frozen-lockfile: fail if pnpm-lock.yaml is out of date.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type-check
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      # Builds the extension and packages it as a .vsix, proving it installs cleanly.
+      - name: Package
+        run: pnpm package
+
+      - name: Upload .vsix
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibestone-vsix
+          path: extension/*.vsix
